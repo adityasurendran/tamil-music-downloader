@@ -32,9 +32,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      # ✅ FIXED: expose secret via env, and test env.* in if:
       - name: Save cookies (optional)
-        if: ${{ secrets.YT_COOKIES != '' }}
-        run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+        if: env.YT_COOKIES != ''
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: echo "$YT_COOKIES" > cookies.txt
 
       - name: Prepare folders
         run: |
@@ -47,7 +50,7 @@ jobs:
         run: |
           set -e
           yt-dlp \
-            --cookies cookies.txt \
+            $( [ -f cookies.txt ] && echo --cookies cookies.txt ) \
             --download-archive .downloaded.txt \
             --ignore-errors --no-abort-on-error \
             --yes-playlist \
