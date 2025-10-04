@@ -1,0 +1,104 @@
+name: Playlist → MP3 (yt-dlp) → Repo
+
+on:
+  schedule:
+    - cron: '30 11 * * *'   # daily 11:30 UTC
+  workflow_dispatch:
+    inputs:
+      playlist_url:
+        description: 'YouTube playlist URL'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install yt-dlp + ffmpeg
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Save cookies (optional)
+        if: ${{ secrets.YT_COOKIES != '' }}
+        run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+
+      - name: Prepare folders
+        run: |
+          mkdir -p songs scripts
+          touch .downloaded.txt
+
+      - name: Download newest (incremental)
+        env:
+          PLAYLIST_URL: ${{ inputs.playlist_url }}
+        run: |
+          set -e
+          yt-dlp \
+            --cookies cookies.txt \
+            --download-archive .downloaded.txt \
+            --ignore-errors --no-abort-on-error \
+            --yes-playlist \
+            -f bestaudio/best \
+            --add-metadata --embed-metadata --embed-thumbnail \
+            --prefer-ffmpeg --extract-audio \
+            --audio-format mp3 --audio-quality 160K \
+            --output "songs/%(title).120B.%(id)s.%(ext)s" \
+            "$PLAYLIST_URL"
+
+          shopt -s nullglob
+          for f in songs/*.*; do
+            if [[ "${f##*.}" != "mp3" ]]; then
+              base="${f%.*}"
+              ffmpeg -y -i "$f" -vn -c:a libmp3lame -b:a 160k "$base.mp3"
+              rm -f "$f"
+            fi
+          done
+
+      - name: Build manifest
+        run: |
+          python - <<'PY'
+          import hashlib, json, pathlib
+          ROOT = pathlib.Path(".").resolve()
+          songs = ROOT/"songs"
+          items=[]
+          for p in sorted(songs.glob("*.mp3")):
+              h=hashlib.sha256()
+              with p.open("rb") as f:
+                  for chunk in iter(lambda: f.read(1<<20), b""):
+                      h.update(chunk)
+              name=p.name
+              title=".".join(name[:-4].split(".")[:-1]) if name.lower().endswith(".mp3") else name
+              items.append({
+                  "title": title,
+                  "filename": name,
+                  "bytes": p.stat().st_size,
+                  "sha256": h.hexdigest(),
+                  "url": f"https://raw.githubusercontent.com/${{ github.repository }}/main/songs/{name}",
+              })
+          (ROOT/"manifest.json").write_text(json.dumps({"version":1,"count":len(items),"items":items}, indent=2), "utf-8")
+          PY
+
+      - name: Commit & push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Update songs & manifest [skip ci]"
+            git push
+          else
+            echo "Nothing to commit."
+          fi
